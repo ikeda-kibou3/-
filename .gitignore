@@ -1,0 +1,16 @@
+# 認証情報・関与先データ・取得した通知書は絶対にコミットしない
+data/clients.csv
+data/credentials.enc
+data/*.key
+out/
+logs/
+templates/*.pdf
+!templates/README.md
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.playwright/

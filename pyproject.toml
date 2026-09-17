@@ -1,0 +1,28 @@
+[project]
+name = "etax-auto"
+version = "0.1.0"
+description = "国税庁e-Taxの「申告のお知らせ」を決算期到来の関与先ごとに自動取得し、チェックリストと束ねて印刷用PDFを作る"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.44",
+    "pypdf>=4.2",
+    "pdfplumber>=0.11",
+    "reportlab>=4.1",
+    "cryptography>=42.0",
+    "PyYAML>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.scripts]
+etax-auto = "etax_auto.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

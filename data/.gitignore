@@ -1,0 +1,3 @@
+# 本番の関与先マスタ・認証情報はコミットしない
+clients.csv
+credentials.enc
