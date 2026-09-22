@@ -16,9 +16,23 @@
 from __future__ import annotations
 
 import csv
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
+# 利用者識別番号は数字16桁
+USER_ID_RX = re.compile(r"\d{16}")
+
+
+def normalize_user_id(value: str) -> str:
+    """全角数字・ハイフン・空白をならして、数字だけにする.
+
+    Excel に貼り付けると全角数字が混ざることがあるので、ここで吸収します。
+    """
+    text = unicodedata.normalize("NFKC", str(value))
+    return re.sub(r"[^0-9]", "", text)
 
 
 # CSV の列名 → 内部名
@@ -57,9 +71,14 @@ class Client:
         self.consumption_extension = _int(self.consumption_extension)
         self.consumption_taxable = _int(self.consumption_taxable, default=1)
         self.active = _int(self.active, default=1)
-        self.user_id = str(self.user_id).replace("-", "").replace(" ", "").strip()
+        self.user_id = normalize_user_id(self.user_id)
         if not 1 <= self.fiscal_month <= 12:
             raise ValueError(f"{self.name}: 決算月は1〜12で指定してください（{self.fiscal_month}）")
+        if not USER_ID_RX.fullmatch(self.user_id):
+            raise ValueError(
+                f"{self.name}: 利用者識別番号は数字16桁です（入力値「{self.user_id}」は{len(self.user_id)}桁）。"
+                "紙のファイルと照合してください。"
+            )
 
     @property
     def folder_name(self) -> str:
@@ -136,7 +155,26 @@ def load_clients(path: Path) -> list[Client]:
                 clients.append(Client(**kwargs))
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(f"関与先マスタ {lineno}行目: {exc}") from exc
+    _check_duplicates(clients)
     return clients
+
+
+def _check_duplicates(clients: list[Client]) -> None:
+    """関与先コードと利用者識別番号の重複を見つける.
+
+    紙から書き写すときやコピー＆ペーストのときに起きやすい取り違えを、
+    実行前にここで止めます。
+    """
+    for label, key in (("関与先コード", "code"), ("利用者識別番号", "user_id")):
+        seen: dict[str, str] = {}
+        for c in clients:
+            value = getattr(c, key)
+            if value in seen:
+                raise ValueError(
+                    f"{label}「{value}」が重複しています（{seen[value]} と {c.name}）。"
+                    "どちらかが書き間違いの可能性があります。"
+                )
+            seen[value] = c.name
 
 
 @dataclass

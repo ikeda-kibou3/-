@@ -116,3 +116,51 @@ def test_folder_name_is_windows_safe():
 @pytest.mark.parametrize("flag,expected", [("○", 1), ("有", 1), ("×", 0), ("なし", 0), ("", 0)])
 def test_flag_parsing(flag, expected):
     assert make(corp_extension=flag).corp_extension == expected
+
+
+# --- 紙から書き写すときの入力ミスを止められるか -----------------------
+
+def test_user_id_must_be_16_digits():
+    with pytest.raises(ValueError, match="16桁"):
+        make(user_id="123456789012345")     # 15桁
+    with pytest.raises(ValueError, match="16桁"):
+        make(user_id="12345678901234567")   # 17桁
+
+
+def test_full_width_digits_are_accepted():
+    """Excelに貼ると全角数字が混ざることがある."""
+    assert make(user_id="１２３４５６７８９０１２３４５６").user_id == "1234567890123456"
+
+
+def test_user_id_with_spaces_and_hyphens():
+    assert make(user_id=" 1234-5678 9012-3456 ").user_id == "1234567890123456"
+
+
+def test_duplicate_client_code_is_rejected(tmp_path):
+    from etax_auto.clients import load_clients
+
+    csv_path = tmp_path / "c.csv"
+    csv_path.write_text(
+        "関与先コード,法人名,事務所,利用者識別番号,決算月,法人税延長,消費税延長,"
+        "消費税課税,担当者,有効,備考\n"
+        "0001,A社,池田,1111111111111111,3,0,0,1,山田,1,\n"
+        "0001,B社,池田,2222222222222222,3,0,0,1,山田,1,\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="関与先コード.*重複"):
+        load_clients(csv_path)
+
+
+def test_duplicate_user_id_is_rejected(tmp_path):
+    from etax_auto.clients import load_clients
+
+    csv_path = tmp_path / "c.csv"
+    csv_path.write_text(
+        "関与先コード,法人名,事務所,利用者識別番号,決算月,法人税延長,消費税延長,"
+        "消費税課税,担当者,有効,備考\n"
+        "0001,A社,池田,1111111111111111,3,0,0,1,山田,1,\n"
+        "0002,B社,池田,1111111111111111,9,0,0,1,佐藤,1,\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="利用者識別番号.*重複"):
+        load_clients(csv_path)
