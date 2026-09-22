@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--date", help="実行日を仮に指定（例 2026-04-15）")
     sr.add_argument("--only", nargs="*", help="この関与先コードだけ処理する")
     sr.add_argument("--dry-run", action="store_true", help="e-Taxにはつながない（チェックリストのみ作成）")
+    sr.add_argument(
+        "--from-dir", type=Path, default=None,
+        help="e-Taxにつながず、このフォルダにある既存PDFを取り込んで後工程だけ行う"
+             "（達人などで落としたファイル用）",
+    )
     sr.add_argument("--headless", action="store_true", help="ブラウザ画面を出さない")
 
     sc = sub.add_parser("cred", help="暗証番号の登録・確認")
@@ -176,8 +181,21 @@ def cmd_run(args, settings) -> int:
 
     report = Report()
 
+    # 取り込みモード（--from-dir）では e-Tax につながないので認証情報は不要
+    from_dir = getattr(args, "from_dir", None)
+    offline = args.dry_run or from_dir is not None
+
+    docs = None
+    if from_dir is not None:
+        from .intake import load_folder
+
+        docs = load_folder(from_dir)
+        if not docs:
+            print(f"\n{from_dir} にPDFが1件もありません。")
+            return 2
+
     store = None
-    if not args.dry_run:
+    if not offline:
         store = CredentialStore(CRED_FILE, get_master()).load()
         missing = [t.client.name for t in targets if t.client.user_id not in store]
         if missing:
@@ -189,7 +207,7 @@ def cmd_run(args, settings) -> int:
 
     session = None
     try:
-        if not args.dry_run:
+        if not offline:
             from .etax import EtaxOptions, EtaxSession
 
             opts = EtaxOptions(
@@ -212,6 +230,7 @@ def cmd_run(args, settings) -> int:
             row = _process_one(
                 t, out_root, session, store,
                 checklist_specs, notices, pages_cfg, hl, bundle, settings,
+                docs=docs,
             )
             report.add(row)
     finally:
@@ -231,6 +250,7 @@ def cmd_run(args, settings) -> int:
 def _process_one(
     t: Target, out_root: Path, session, store,
     checklist_specs, notices, pages_cfg, hl, bundle, settings,
+    docs=None,
 ) -> Row:
     from . import pdfwork
 
@@ -270,31 +290,49 @@ def _process_one(
     # --- e-Tax から通知書を取得 --------------------------------------
     corp_pdf = out_dir / "a_法人税通知.pdf"
     cons_pdf = out_dir / "b_消費税通知.pdf"
-    if session is None:
+    jobs = [
+        ("法人税通知", t.need_corp, notices["corp_tax_pattern"],
+         corp_pdf, pages_cfg.get("corp_tax_pages", [1])),
+        ("消費税通知", t.need_consumption, notices["consumption_tax_pattern"],
+         cons_pdf, pages_cfg.get("consumption_tax_pages", [1])),
+    ]
+
+    if docs is not None:
+        # --- 手元のPDFを取り込むモード（達人などで落としたファイル） -----
+        from .intake import find
+
+        for field, needed, pattern, dest, pages in jobs:
+            if not needed:
+                continue
+            src = find(docs, name=c.name, user_id=c.user_id, code=c.code, tax_pattern=pattern)
+            if src is None:
+                setattr(row, field, "該当なし")
+                continue
+            try:
+                setattr(row, field, _finish(src, dest, pages, hl))
+            except Exception as exc:  # noqa: BLE001
+                log.error("  %s の加工に失敗: %s", field, exc)
+                setattr(row, field, "失敗")
+                row.メモ = (row.メモ + " / " if row.メモ else "") + f"{field}: {exc}"
+
+    elif session is None:
         row.法人税通知 = row.消費税通知 = "省略(dry-run)"
+
     else:
+        # --- e-Tax から取得するモード ------------------------------------
         try:
             password = store.get(c.user_id)
             session.login(c.user_id, password)
             session.open_notice_list()
-
-            if t.need_corp:
-                row.法人税通知 = _fetch(
-                    session, notices["corp_tax_pattern"], corp_pdf,
-                    pages_cfg.get("corp_tax_pages", [1]), hl,
-                )
-            if t.need_consumption:
-                row.消費税通知 = _fetch(
-                    session, notices["consumption_tax_pattern"], cons_pdf,
-                    pages_cfg.get("consumption_tax_pages", [1]), hl,
-                )
+            for field, needed, pattern, dest, pages in jobs:
+                if needed:
+                    setattr(row, field, _fetch(session, pattern, dest, pages, hl))
             session.logout()
         except Exception as exc:  # noqa: BLE001
             log.error("  e-Tax処理に失敗: %s", exc)
-            if t.need_corp and row.法人税通知 == "-":
-                row.法人税通知 = "失敗"
-            if t.need_consumption and row.消費税通知 == "-":
-                row.消費税通知 = "失敗"
+            for field, needed, *_ in jobs:
+                if needed and getattr(row, field) == "-":
+                    setattr(row, field, "失敗")
             row.メモ = (row.メモ + " / " if row.メモ else "") + str(exc)
 
     # --- ①②③(a)(b) の順に束ねる --------------------------------------
@@ -312,17 +350,23 @@ def _process_one(
 
 
 def _fetch(session, pattern: str, dest: Path, pages: list[int], hl: dict) -> str:
-    """1つのお知らせを開いてPDF化し、必要ページを抜いてハイライトする."""
-    from . import pdfwork
-
+    """e-Taxで1つのお知らせを開いてPDF化し、必要ページを抜いてハイライトする."""
     if not session.open_notice(pattern):
         return "該当なし"
     raw = dest.with_name(dest.stem + "_原本.pdf")
     session.save_current_as_pdf(raw)
+    status = _finish(raw, dest, pages, hl)
+    session.back()
+    return status
+
+
+def _finish(raw: Path, dest: Path, pages: list[int], hl: dict) -> str:
+    """取得元によらない後工程：必要ページを抜いて、税額に色を付ける."""
+    from . import pdfwork
+
     pdfwork.extract_pages(raw, list(pages), dest)
     if hl.get("enabled", True):
         pdfwork.highlight_amounts(dest, list(hl.get("keywords", [])))
-    session.back()
     return "取得"
 
 
