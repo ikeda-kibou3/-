@@ -23,6 +23,7 @@ from .checklist import FillValues, build_checklists, calibrate, load_checklist_c
 from .clients import Client, Target, load_clients, select_targets
 from .config import DEFAULT_CHECKLISTS, ROOT, load_selectors, load_settings
 from .crypto import CredentialStore, get_master
+from .importer import INTERNAL_TO_JP
 from .logs import get_logger, setup_logging
 from .report import Report, Row
 
@@ -64,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("action", choices=["set", "list", "delete", "verify"])
     sc.add_argument("user_id", nargs="?", help="利用者識別番号")
 
+    si = sub.add_parser("import-clients", help="達人などのCSVから関与先マスタを起こす")
+    si.add_argument("source", type=Path, help="ソフトが書き出したCSV")
+    si.add_argument("--out", type=Path, default=None, help="出力先（既定 data/clients.csv）")
+    si.add_argument("--office", default="", help="事務所名の列が無いときに一律で入れる値")
+    si.add_argument("--force", action="store_true", help="既存の関与先マスタを上書きする")
+
     sub.add_parser("capture", help="e-Taxを開いて画面を保存する（セレクタ調査用）")
 
     scal = sub.add_parser("calibrate", help="チェックリストの座標確認用PDFを作る")
@@ -82,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         "plan": cmd_plan,
         "run": cmd_run,
         "cred": cmd_cred,
+        "import-clients": cmd_import_clients,
         "capture": cmd_capture,
         "calibrate": cmd_calibrate,
         "check": cmd_check,
@@ -414,6 +422,67 @@ def cmd_cred(args, settings) -> int:
     store.save()
     print(f"登録しました（現在 {len(store)} 件）。")
     return 0
+
+
+def cmd_import_clients(args, settings) -> int:
+    from .importer import convert, write_clients_csv
+
+    dest = args.out or CLIENTS_CSV
+    extra = _load_import_aliases()
+    result = convert(
+        args.source,
+        existing=dest if dest.exists() else None,
+        extra_aliases=extra,
+        default_office=args.office,
+    )
+
+    print(f"\n■ 読み取った列の対応（{args.source}）")
+    for internal, jp in INTERNAL_TO_JP.items():
+        src = result.mapping.get(internal)
+        mark = "OK  " if src else "未  "
+        print(f"  [{mark}] {jp:<12} ← {src or '（対応する列が見つかりません）'}")
+
+    if result.unmapped_columns:
+        print("\n  使わなかった列:")
+        print("    " + " / ".join(result.unmapped_columns))
+        print("  この中に必要な列があれば config/import_map.yaml に追加してください。")
+
+    if result.missing_fields:
+        print(f"\n  ※ {', '.join(result.missing_fields)} は空欄で出力します。あとで手で埋めてください。")
+
+    print(f"\n  変換できた関与先: {len(result.rows)} 社")
+    if result.carried_over:
+        print(f"  既存マスタから延長・有効フラグ等を引き継いだ関与先: {result.carried_over} 社")
+
+    if not result.rows:
+        print("\n1件も読み取れませんでした。法人名の列が見つかっているかご確認ください。")
+        return 2
+
+    if dest.exists() and not args.force:
+        backup = dest.with_name(dest.stem + "_backup" + dest.suffix)
+        backup.write_bytes(dest.read_bytes())
+        print(f"\n  既存のマスタを {backup.name} に控えました。")
+
+    write_clients_csv(result.rows, dest)
+    print(f"\n書き出しました: {dest}")
+    print("\n次にすること:")
+    print("  1. Excelで開き、法人税延長・消費税延長・消費税課税・有効 を確認する")
+    print("     （延長特例のある関与先は必ず 1 にしてください。処理月がずれます）")
+    print("  2. etax-auto check で全件の検査をする")
+    print("  3. etax-auto plan --date <対象月> で拾えるか確かめる")
+    return 0
+
+
+def _load_import_aliases() -> dict[str, list[str]]:
+    """config/import_map.yaml があれば、列名の候補を足す."""
+    path = ROOT / "config" / "import_map.yaml"
+    if not path.exists():
+        return {}
+    import yaml
+
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    return {k: list(v) for k, v in (data.get("aliases") or {}).items()}
 
 
 def cmd_capture(args, settings) -> int:
