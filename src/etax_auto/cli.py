@@ -77,7 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     scal.add_argument("template", type=Path)
     scal.add_argument("--step", type=int, default=50)
 
-    sub.add_parser("check", help="設定と環境の健康診断")
+    sk = sub.add_parser("check", help="設定と環境の健康診断")
+    sk.add_argument(
+        "--mode", choices=["a", "b"], default="a",
+        help="a=達人などで落としたPDFを取り込む方式（既定）／b=e-Taxへ自動ログインする方式",
+    )
     return p
 
 
@@ -523,13 +527,23 @@ def cmd_calibrate(args, settings) -> int:
 
 def cmd_check(args, settings) -> int:
     ok = True
+    mode_b = getattr(args, "mode", "a") == "b"
 
-    def line(label: str, good: bool, note: str = "") -> None:
+    def line(label: str, good: bool, note: str = "", required: bool = True) -> None:
+        """required=False の項目は、欠けていても全体の判定を下げない."""
         nonlocal ok
-        ok = ok and good
-        print(f"  [{'OK' if good else '要対応'}] {label}{('  … ' + note) if note else ''}")
+        if required:
+            ok = ok and good
+            mark = "OK" if good else "要対応"
+        else:
+            mark = "OK" if good else "任意"
+        print(f"  [{mark}] {label}{('  … ' + note) if note else ''}")
 
     print("\n■ 設定と環境の健康診断")
+    print("  方式: " + (
+        "B（e-Taxへ自動ログイン）" if mode_b
+        else "A（達人などで落としたPDFを取り込む） ※ --mode b で方式Bを検査"
+    ))
     line("settings.toml", True, str(settings.path))
 
     csv_path = args.clients or CLIENTS_CSV
@@ -544,13 +558,16 @@ def cmd_check(args, settings) -> int:
         line("関与先マスタ", False, f"{csv_path} がありません（sample をコピーしてください）")
 
     line("認証情報ファイル", CRED_FILE.exists(),
-         str(CRED_FILE) if CRED_FILE.exists() else "`etax-auto cred set` で作成してください")
+         str(CRED_FILE) if CRED_FILE.exists()
+         else ("`etax-auto cred set` で作成してください" if mode_b
+               else "方式Aでは不要です（暗証番号は達人側で管理）"),
+         required=mode_b)
 
     try:
         sel = load_selectors()
-        line("selectors.yaml", True, f"{len(sel)}ステップ定義")
+        line("selectors.yaml", True, f"{len(sel)}ステップ定義", required=mode_b)
     except Exception as exc:  # noqa: BLE001
-        line("selectors.yaml", False, str(exc))
+        line("selectors.yaml", False, str(exc), required=mode_b)
 
     specs = load_checklist_config(DEFAULT_CHECKLISTS)
     for spec in specs:
@@ -558,26 +575,37 @@ def cmd_check(args, settings) -> int:
         line(f"チェックリスト原本 {spec['id']}", tpl.exists(),
              str(tpl) if tpl.exists() else f"{tpl} を用意してください")
 
-    for mod, label in [("playwright", "Playwright"), ("pypdf", "pypdf"),
-                       ("pdfplumber", "pdfplumber"), ("reportlab", "reportlab"),
-                       ("cryptography", "cryptography"), ("yaml", "PyYAML")]:
+    for mod, label in [("pypdf", "pypdf"), ("pdfplumber", "pdfplumber"),
+                       ("reportlab", "reportlab"), ("cryptography", "cryptography"),
+                       ("yaml", "PyYAML")]:
         try:
             __import__(mod)
             line(label, True)
         except Exception as exc:  # noqa: BLE001
-            line(label, False, str(exc))
+            line(label, False, f"{exc}（pip install -r requirements-minimal.txt）")
+
+    # --- ここから下は方式B（e-Taxへ自動ログイン）のときだけ必要 ---------
+    note_a = "方式Aでは不要です"
+    try:
+        __import__("playwright")
+        line("Playwright", True, required=mode_b)
+    except Exception as exc:  # noqa: BLE001
+        line("Playwright", False, str(exc) if mode_b else note_a, required=mode_b)
 
     try:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as pw:
-            b = pw.chromium.launch(headless=True)
-            b.close()
-        line("Chromium ブラウザ", True)
+            pw.chromium.launch(headless=True).close()
+        line("Chromium ブラウザ", True, required=mode_b)
     except Exception as exc:  # noqa: BLE001
-        line("Chromium ブラウザ", False, f"{exc}（`playwright install chromium` を実行）")
+        line("Chromium ブラウザ", False,
+             f"{exc}（`playwright install chromium` を実行）" if mode_b else note_a,
+             required=mode_b)
 
     print("\n" + ("すべて準備できています。" if ok else "上の「要対応」を片付けてください。"))
+    if not mode_b:
+        print("（「任意」は方式Bを使うときだけ必要な項目です）")
     return 0 if ok else 1
 
 

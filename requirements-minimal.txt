@@ -1,0 +1,10 @@
+# 方式A（達人などで落としたPDFを取り込む）だけを使う場合の依存
+#   pip install -r requirements-minimal.txt
+#
+# ブラウザ部品（playwright）が要らないので、
+# 管理者権限の無いPCやポータブル構成でも入れやすくなっています。
+pypdf>=4.2
+pdfplumber>=0.11
+reportlab>=4.1
+cryptography>=42.0
+PyYAML>=6.0
