@@ -119,3 +119,19 @@ def find(
             log.info("取り込み: %s → %s", doc.path.name, name)
             return doc.path
     return None
+
+
+def unmatched(docs: list[SourceDoc], used: set[Path]) -> list[SourceDoc]:
+    """どの関与先にも紐づかなかったPDFを返す.
+
+    黙って無視すると「取りこぼしたのに気づかない」が起きるので、
+    必ず一覧にして人に見せます。元のファイルは動かしません
+    （達人の出力フォルダを勝手に書き換えないため）。
+    """
+    return [d for d in docs if d.path not in used]
+
+
+def describe(doc: SourceDoc, limit: int = 60) -> str:
+    """未照合一覧に出す、そのPDFの手がかり（本文の先頭）."""
+    head = " ".join((doc.head_text or "").split())
+    return head[:limit] if head else "（本文を読めませんでした）"

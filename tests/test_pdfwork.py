@@ -110,3 +110,24 @@ def test_calibrate_produces_grid(tmp_path):
     tpl = make_pdf(tmp_path / "tpl.pdf", ["原本"])
     dest = calibrate(tpl, tmp_path / "grid.pdf")
     assert dest.exists() and pdfwork.page_count(dest) == 1
+
+
+# --- 未照合の記録 -----------------------------------------------------
+
+def test_report_writes_unmatched_csv(tmp_path):
+    from etax_auto.report import Report
+
+    r = Report()
+    r.add_unmatched("msg_001.pdf", "法人税及び地方法人税の確定申告について")
+    dest = r.write_unmatched_csv(tmp_path / "_未照合PDF一覧.csv")
+    assert dest and dest.exists()
+    text = dest.read_text(encoding="utf-8-sig")
+    assert "msg_001.pdf" in text
+    assert "未照合" in r.summary()
+
+
+def test_report_skips_unmatched_csv_when_none(tmp_path):
+    from etax_auto.report import Report
+
+    assert Report().write_unmatched_csv(tmp_path / "none.csv") is None
+    assert not (tmp_path / "none.csv").exists()

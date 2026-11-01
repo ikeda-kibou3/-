@@ -29,9 +29,27 @@ class Row:
 @dataclass
 class Report:
     rows: list[Row] = field(default_factory=list)
+    # 取り込みモードで、どの関与先にも紐づかなかったPDF
+    unmatched: list[tuple[str, str]] = field(default_factory=list)
 
     def add(self, row: Row) -> None:
         self.rows.append(row)
+
+    def add_unmatched(self, path: str, hint: str) -> None:
+        self.unmatched.append((path, hint))
+
+    def write_unmatched_csv(self, dest: Path) -> Path | None:
+        """未照合PDFの一覧を書き出す（無ければ何もしない）."""
+        if not self.unmatched:
+            return None
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("w", encoding="utf-8-sig", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["ファイル", "本文の先頭"])
+            writer.writerows(self.unmatched)
+        log.info("未照合PDFの一覧を書き出しました: %s", dest)
+        return dest
 
     @property
     def failures(self) -> list[Row]:
@@ -61,5 +79,13 @@ class Report:
             lines.append(" 【手作業で確認が必要な関与先】")
             for r in self.failures:
                 lines.append(f"   ・{r.法人名}（{r.担当者}） {r.メモ}")
+        if self.unmatched:
+            lines.append("")
+            lines.append(f" 【どの関与先にも紐づかなかったPDF {len(self.unmatched)}件】")
+            lines.append("   取りこぼしの可能性があります。_未照合PDF一覧.csv をご確認ください。")
+            for path, hint in self.unmatched[:5]:
+                lines.append(f"   ・{path}  {hint}")
+            if len(self.unmatched) > 5:
+                lines.append(f"   ほか {len(self.unmatched) - 5} 件")
         lines.append("=" * 58)
         return "\n".join(lines)

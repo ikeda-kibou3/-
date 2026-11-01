@@ -111,3 +111,40 @@ def test_broken_pdf_does_not_stop_the_scan(tmp_path):
     make_pdf(tmp_path / "ok.pdf", "法人税及び地方法人税の確定申告について")
     docs = load_folder(tmp_path)
     assert len(docs) == 2  # 壊れたファイルも一覧には残る（ファイル名で判定できるため）
+
+
+# --- 取りこぼしを黙って見逃さないこと ---------------------------------
+
+def test_unmatched_lists_only_unused(tmp_path):
+    from etax_auto.intake import unmatched
+
+    a = make_pdf(tmp_path / "a.pdf", "x")
+    b = make_pdf(tmp_path / "b.pdf", "x")
+    c = make_pdf(tmp_path / "c.pdf", "x")
+    docs = [SourceDoc(path=p, head_text="本文") for p in (a, b, c)]
+    left = unmatched(docs, {a, c})
+    assert [d.path for d in left] == [b]
+
+
+def test_unmatched_empty_when_all_used(tmp_path):
+    from etax_auto.intake import unmatched
+
+    a = make_pdf(tmp_path / "a.pdf", "x")
+    docs = [SourceDoc(path=a, head_text="本文")]
+    assert unmatched(docs, {a}) == []
+
+
+def test_describe_gives_a_clue(tmp_path):
+    from etax_auto.intake import describe
+
+    doc = SourceDoc(path=Path("x.pdf"),
+                    head_text="法人税及び地方法人税の確定申告について\n株式会社ほか")
+    text = describe(doc)
+    assert "法人税及び地方法人税" in text
+    assert "\n" not in text
+
+
+def test_describe_handles_unreadable_pdf():
+    from etax_auto.intake import describe
+
+    assert "読めません" in describe(SourceDoc(path=Path("x.pdf"), head_text=""))

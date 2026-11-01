@@ -236,15 +236,23 @@ def cmd_run(args, settings) -> int:
         interval = int(etax_cfg.get("interval_sec", 5))
         import time
 
+        used_docs: set = set()
         for i, t in enumerate(targets):
             if session and i > 0 and interval > 0:
                 time.sleep(interval)
             row = _process_one(
                 t, out_root, session, store,
                 checklist_specs, notices, pages_cfg, hl, bundle, settings,
-                docs=docs,
+                docs=docs, used=used_docs,
             )
             report.add(row)
+
+        # 取り込みモードでは、どの関与先にも紐づかなかったPDFを必ず報告する
+        if docs is not None:
+            from .intake import describe, unmatched
+
+            for doc in unmatched(docs, used_docs):
+                report.add_unmatched(doc.path.name, describe(doc))
     finally:
         if session:
             try:
@@ -254,6 +262,7 @@ def cmd_run(args, settings) -> int:
             session.__exit__(None, None, None)
 
     report.write_csv(out_root / "_結果一覧.csv")
+    report.write_unmatched_csv(out_root / "_未照合PDF一覧.csv")
     print(report.summary())
     print(f"\n出力先: {out_root}")
     return 1 if report.failures else 0
@@ -262,7 +271,7 @@ def cmd_run(args, settings) -> int:
 def _process_one(
     t: Target, out_root: Path, session, store,
     checklist_specs, notices, pages_cfg, hl, bundle, settings,
-    docs=None,
+    docs=None, used=None,
 ) -> Row:
     from . import pdfwork
 
@@ -320,6 +329,8 @@ def _process_one(
             if src is None:
                 setattr(row, field, "該当なし")
                 continue
+            if used is not None:
+                used.add(src)
             try:
                 setattr(row, field, _finish(src, dest, pages, hl))
             except Exception as exc:  # noqa: BLE001
