@@ -133,3 +133,73 @@ def test_logout_is_optional_and_never_raises(tmp_path):
         s.login(GOOD_ID, GOOD_PW)
         s.logout()
         assert "国税電子申告" in s.page.inner_text("body")
+
+
+# --- 方式C：税理士マイページを巡回する ---------------------------------
+
+MYPAGE = Path(__file__).parent / "mock_etax" / "client_list.html"
+
+
+def mypage_opts(tmp_path: Path) -> EtaxOptions:
+    return make_opts(tmp_path, login_url=MYPAGE.as_uri())
+
+
+def test_open_client_by_name(tmp_path):
+    """法人格を除いた固有部分で関与先を開けること."""
+    with EtaxSession(mypage_opts(tmp_path)) as s:
+        s.page.goto(MYPAGE.as_uri())
+        assert s.open_client("株式会社サンプル商事", "1234567890123456") is True
+        assert "株式会社サンプル商事 のマイページ" in s.page.inner_text("body")
+
+
+def test_open_client_by_user_id(tmp_path):
+    """法人名が一覧と違っても、利用者識別番号で開けること."""
+    with EtaxSession(mypage_opts(tmp_path)) as s:
+        s.page.goto(MYPAGE.as_uri())
+        assert s.open_client("（旧）サンプル商事", "2345678901234567") is True
+        assert "有限会社テスト製作所" in s.page.inner_text("body")
+
+
+def test_unknown_client_returns_false(tmp_path):
+    with EtaxSession(mypage_opts(tmp_path)) as s:
+        s.page.goto(MYPAGE.as_uri())
+        assert s.open_client("株式会社まったく別の会社", "9999999999999999") is False
+
+
+def test_mypage_round_trip_for_two_clients(tmp_path):
+    """1回のログインで2社を回り、それぞれPDFを保存できること."""
+    from etax_auto import pdfwork
+
+    with EtaxSession(mypage_opts(tmp_path)) as s:
+        s.page.goto(MYPAGE.as_uri())
+
+        # 1社目
+        assert s.open_client("株式会社サンプル商事", "1234567890123456")
+        s.open_notice_list()
+        assert s.open_notice("法人税及び地方法人税.*確定申告")
+        a = tmp_path / "a.pdf"
+        s.save_current_as_pdf(a)
+        s.back_to_client_list()
+
+        # 2社目（ログインし直さない）
+        assert s.open_client("有限会社テスト製作所", "2345678901234567")
+        s.open_notice_list()
+        assert s.open_notice("法人税及び地方法人税.*確定申告")
+        b = tmp_path / "b.pdf"
+        s.save_current_as_pdf(b)
+
+    assert pdfwork.page_count(a) >= 1 and pdfwork.page_count(b) >= 1
+
+    import pdfplumber
+
+    with pdfplumber.open(str(b)) as pdf:
+        text = pdf.pages[0].extract_text() or ""
+    assert "有限会社テスト製作所" in text   # 1社目の内容が混ざっていないこと
+
+
+def test_back_to_client_list_works(tmp_path):
+    with EtaxSession(mypage_opts(tmp_path)) as s:
+        s.page.goto(MYPAGE.as_uri())
+        s.open_client("株式会社サンプル商事", "1234567890123456")
+        s.back_to_client_list()
+        assert "関与先一覧" in s.page.inner_text("body")

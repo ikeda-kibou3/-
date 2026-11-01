@@ -92,6 +92,7 @@ class EtaxSession:
         self.browser = None
         self.context = None
         self.page = None
+        self._client_list_url: str | None = None
 
     def __enter__(self) -> "EtaxSession":
         from playwright.sync_api import sync_playwright
@@ -197,6 +198,111 @@ class EtaxSession:
             return False
         return bool(re.search(r"(暗証番号.*誤|一致しません|ログインできません|ロック)", body))
 
+    # --- 方式C（税理士マイページ）------------------------------------
+    def manual_login(self) -> None:
+        """人が自分の手でログインするのを待つ.
+
+        税理士マイページは電子証明書（ICカードリーダー＋PIN、マイナンバーカード等）
+        での認証が要るため、ログインだけは人が行い、その後をツールが引き継ぎます。
+        **月に1回、この操作だけ**です。
+        """
+        self.page.goto(self.opts.login_url)
+        print("\n" + "=" * 62)
+        print("【ログインをお願いします】")
+        print("  開いたブラウザで、税理士の電子証明書でログインしてください。")
+        print("  関与先一覧が見える状態まで進めてください。")
+        print("")
+        print("  終わったら、この画面で Enter を押してください。")
+        print("  （中止する場合は Ctrl+C）")
+        print("=" * 62)
+        input()
+        self.capture("after_manual_login")
+        log.info("ログイン済みとして処理を続けます")
+
+    def open_client_list(self) -> bool:
+        """関与先一覧を開く（すでに表示されていれば何もしない）."""
+        opened = self.step_click(
+            "client_list", required=False, hint="「関与先一覧」を開いてください"
+        )
+        self._remember_client_list()
+        return opened
+
+    def _remember_client_list(self) -> None:
+        """関与先一覧のURLを覚えておく（確実に戻るため）."""
+        try:
+            self._client_list_url = self.page.url
+        except Exception:  # noqa: BLE001
+            pass
+
+    def open_client(self, name: str, user_id: str) -> bool:
+        """関与先一覧から1社を開く.
+
+        利用者識別番号 → 法人名の固有部分 の順で突き合わせます。
+        「株式会社」だけで他社に当たらないよう、法人格は除いて照合します。
+        一覧は表形式で、識別番号が法人名と別の列にあることが多いため、
+        **行全体の文字**を見て判定し、その行の中のリンクを押します。
+        """
+        from .intake import core_name, normalize
+
+        keys = [k for k in (normalize(user_id), core_name(name)) if len(k) >= 2]
+        if not keys:
+            log.warning("照合の手がかりがありません: %s", name)
+            return False
+        self._remember_client_list()
+
+        # 1) 表の行で探す（識別番号が別の列にあっても当たる）
+        rows = self.page.locator("tr")
+        for i in range(rows.count()):
+            row = rows.nth(i)
+            try:
+                text = normalize(row.inner_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if not (text and any(key in text for key in keys)):
+                continue
+            link = row.locator("a").first
+            try:
+                link.wait_for(state="visible", timeout=1500)
+            except Exception:  # noqa: BLE001
+                continue
+            log.info("関与先を開きます: %s", name)
+            link.click()
+            self._settle()
+            return True
+
+        # 2) 表でなければリンクの文字で探す
+        links = self.page.locator("a")
+        for i in range(links.count()):
+            link = links.nth(i)
+            try:
+                text = normalize(link.inner_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if text and any(key in text for key in keys):
+                log.info("関与先を開きます: %s", name)
+                link.click()
+                self._settle()
+                return True
+
+        log.warning("関与先一覧に見つかりません: %s", name)
+        return False
+
+    def back_to_client_list(self) -> None:
+        """関与先一覧へ戻る.
+
+        お知らせの画面から「戻る」を何回押せばよいかは画面次第なので、
+        覚えておいたURLへ直接戻ります。
+        """
+        url = getattr(self, "_client_list_url", None)
+        if url:
+            self.page.goto(url)
+            self._settle()
+            return
+        if not self.step_click("back_to_client_list", required=False):
+            self.page.go_back()
+            self._settle()
+
+    # --- 共通 ---------------------------------------------------------
     def open_notice_list(self) -> None:
         self.step_click("message_box", hint="「送信結果・お知らせ」を押してください")
         self.step_click("notice_folder", required=False, hint="「お知らせ・受信通知」を押してください")

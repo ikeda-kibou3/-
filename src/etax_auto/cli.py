@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
              "（達人などで落としたファイル用）",
     )
     sr.add_argument("--headless", action="store_true", help="ブラウザ画面を出さない")
+    sr.add_argument(
+        "--mypage", action="store_true",
+        help="方式C：税理士マイページを巡回する。ログインだけ人が行い（電子証明書）、"
+             "そのあと全社分をツールが自動で回る。関与先ごとの暗証番号は不要",
+    )
 
     sc = sub.add_parser("cred", help="暗証番号の登録・確認")
     sc.add_argument("action", choices=["set", "list", "delete", "verify"])
@@ -206,8 +211,11 @@ def cmd_run(args, settings) -> int:
             print(f"\n{from_dir} にPDFが1件もありません。")
             return 2
 
+    mypage = getattr(args, "mypage", False)
+
     store = None
-    if not offline:
+    if not offline and not mypage:
+        # 方式Cは税理士の電子証明書でログインするので、関与先の暗証番号は使わない
         store = CredentialStore(CRED_FILE, get_master()).load()
         missing = [t.client.name for t in targets if t.client.user_id not in store]
         if missing:
@@ -232,6 +240,9 @@ def cmd_run(args, settings) -> int:
                 selectors=load_selectors(),
             )
             session = EtaxSession(opts).__enter__()
+            if mypage:
+                # 税理士の電子証明書でのログインだけ人が行う（月1回）
+                session.manual_login()
 
         interval = int(etax_cfg.get("interval_sec", 5))
         import time
@@ -243,7 +254,7 @@ def cmd_run(args, settings) -> int:
             row = _process_one(
                 t, out_root, session, store,
                 checklist_specs, notices, pages_cfg, hl, bundle, settings,
-                docs=docs, used=used_docs,
+                docs=docs, used=used_docs, mypage=mypage,
             )
             report.add(row)
 
@@ -271,7 +282,7 @@ def cmd_run(args, settings) -> int:
 def _process_one(
     t: Target, out_root: Path, session, store,
     checklist_specs, notices, pages_cfg, hl, bundle, settings,
-    docs=None, used=None,
+    docs=None, used=None, mypage=False,
 ) -> Row:
     from . import pdfwork
 
@@ -341,8 +352,30 @@ def _process_one(
     elif session is None:
         row.法人税通知 = row.消費税通知 = "省略(dry-run)"
 
+    elif mypage:
+        # --- 方式C：税理士マイページを巡回するモード ----------------------
+        try:
+            session.open_client_list()
+            if not session.open_client(c.name, c.user_id):
+                for field, needed, *_ in jobs:
+                    if needed:
+                        setattr(row, field, "該当なし")
+                row.メモ = "関与先一覧に見つかりませんでした"
+            else:
+                session.open_notice_list()
+                for field, needed, pattern, dest, pages in jobs:
+                    if needed:
+                        setattr(row, field, _fetch(session, pattern, dest, pages, hl))
+                session.back_to_client_list()
+        except Exception as exc:  # noqa: BLE001
+            log.error("  マイページ処理に失敗: %s", exc)
+            for field, needed, *_ in jobs:
+                if needed and getattr(row, field) == "-":
+                    setattr(row, field, "失敗")
+            row.メモ = (row.メモ + " / " if row.メモ else "") + str(exc)
+
     else:
-        # --- e-Tax から取得するモード ------------------------------------
+        # --- 方式B：関与先ごとにログインするモード ------------------------
         try:
             password = store.get(c.user_id)
             session.login(c.user_id, password)
